@@ -1,9 +1,9 @@
 /******************************************************************************
- * hardware.h  -  shim amplifier, 16-bit readback version
+ * hardware.h  -  Rev C shim amplifier, 12-bit readback version
  *
- *   Microcontroller : Teensy 4.1, Arduino SPI library
+ *   Microcontroller : Teensy 3.5 (Kinetis K64), SPI via kinetis_spi.h (included)
  *   DAC             : LTC2656 (16-bit, 8 channels per board)
- *   ADC (readback)  : LTC1867 (16-bit, 8 channels per board)
+ *   ADC (readback)  : LTC1863 (12-bit, 8 channels per board)
  *   Trigger         : fiber (pin 6) or BNC (pin 4), selected in config.h
  *
  * Site settings (trigger source, board map, readback scaling, ...) are in
@@ -13,13 +13,13 @@
 #pragma once
 #include <Arduino.h>
 #include "config.h"
-#include <SPI.h>
+#include "kinetis_spi.h"
 
 /*============================================================================*
  *  ADC (sense-amp scaling is in config.h)
  *============================================================================*/
 const float ADC_VREF   = 4.096;       // ADC reference (V)
-const float ADC_COUNTS = 65535.0;     // 16-bit
+const float ADC_COUNTS = 4096.0;      // 12-bit
 
 /*============================================================================*
  *  Pins
@@ -29,7 +29,7 @@ const int selectPin1   = 15;
 const int boardSelect2 = 16;          // 3-bit board (slot) select
 const int boardSelect1 = 17;
 const int boardSelect0 = 18;
-const int CS_BB        = 30;          // chip select driven low during ADC reads
+const int CS_BB        = 30;          // bit-banged chip select used during ADC reads
 
 /*============================================================================*
  *  Trigger wiring (choose the source in config.h)
@@ -79,15 +79,20 @@ uint8_t channelMap_ADC[NUM_C]     = {0, 4, 1, 5, 2, 6, 3, 7};
 
 /*============================================================================*
  *  SPI state
+ *  SPI0 = master (DAC writes, ADC commands); SPI1 = slave that receives the
+ *  ADC result through the readback buffer, collected in spi1_isr().
  *============================================================================*/
-volatile uint16_t data_tx[2] = {};
-volatile uint16_t data_rx[2] = {};
+KinetisSpi spiMaster(&KINETISK_SPI0);
+KinetisSpi spiSlave(&KINETISK_SPI1);
+volatile uint16_t data_tx[20] = {};
+volatile uint16_t data_rx[20] = {};
+volatile bool read_in_flight = false;
 
-// Kept for compatibility with the shared .ino: this ADC is read directly by
-// the SPI master, so a read can't wait forever and this stays 0.
+// ADC reads that got no reply on SPI1 (counted per command; see the .ino).
+// A read gives up after ADC_TIMEOUT_US instead of waiting forever.
 volatile unsigned long adcTimeouts = 0;
-volatile bool adcLastTimedOut = false;
-const uint32_t SPI_CLOCK_HZ = 500000;   // slow clock for signal integrity
+volatile bool adcLastTimedOut = false;      // true if the most recent read got no reply
+const unsigned long ADC_TIMEOUT_US = 5000;
 
 /*============================================================================*
  *  Init
@@ -105,13 +110,18 @@ void initIO() {
 }
 
 void spiInit() {
-  SPI.begin();
-  SPI1.begin();     // not used for reads in this version; kept as in the original
+  spiMaster.beginMaster16(KSPI_CLOCK_DIV32);   // DIV32 (not DIV16): slower bus for signal integrity
+  spiSlave.beginSlave16Mode1();
+  delay(2000);   // start-up pause the T3SPI constructors used to add (2 x 1 s)
 }
 
-// Called once at the end of setup(). Nothing to do for this ADC.
+// Called once at the end of setup(): enable the SPI1 receive interrupt and
+// clear anything the slave picked up during start-up.
 void adcInit() {
+  NVIC_ENABLE_IRQ(IRQ_SPI1);
   delay(500);
+  spiSlave.packetCT = 0;
+  spiSlave.dataPointer = 0;
 }
 
 /*============================================================================*
@@ -139,45 +149,72 @@ void LTC2656Write(LTC26456_COMMAND action, LTC2656_ADDRESS address, uint16_t val
   selectDAC();
   data_tx[0] = ((action | address) & 0xFF);
   data_tx[1] = value;
-  SPI.beginTransaction(SPISettings(SPI_CLOCK_HZ, MSBFIRST, SPI_MODE0));
-  SPI.transfer16(data_tx[0]);
-  SPI.transfer16(data_tx[1]);
-  SPI.endTransaction();
+  spiMaster.tx16(data_tx, 2, KSPI_PCS0);
   selectNone();
   sei();
   delayMicroseconds(100);
 }
 
 /*============================================================================*
- *  ADC read (LTC1867)
+ *  ADC read (LTC1863)
  *  Frame 1 selects the channel; raising CS starts the conversion. Frame 2
- *  clocks out that result (and sets up a conversion we ignore).
- *  Returns the 16-bit code (0..65535).
+ *  clocks out the result, which arrives on SPI1 via spi1_isr().
+ *  Returns the 12-bit code (0..4095).
  *============================================================================*/
 uint16_t readAdcCode(uint8_t c) {
+  read_in_flight = true;
+  NVIC_ENABLE_IRQ(IRQ_SPI1);
   selectNone();
   selectADC();
   digitalWrite(CS_BB, 0);
   // command word: single-ended, channel, unipolar
   data_tx[0] = ((0x80 | (channelMap_ADC[c] << 4) | 0x04) << 8);
-  SPI.beginTransaction(SPISettings(SPI_CLOCK_HZ, MSBFIRST, SPI_MODE0));
-  data_rx[0] = SPI.transfer16(data_tx[0]);
-  SPI.endTransaction();
+  spiMaster.tx16(data_tx, 1, KSPI_PCS0);
   selectNone();                     // CS high -> start conversion
   delayMicroseconds(20);            // conversion time
 
   selectNone();
   selectADC();
-  digitalWrite(CS_BB, 0);
-  data_tx[1] = ((0x80 | (c << 4) | 0x04) << 8);
-  SPI.beginTransaction(SPISettings(SPI_CLOCK_HZ, MSBFIRST, SPI_MODE0));
-  data_rx[1] = SPI.transfer16(data_tx[1]);
-  SPI.endTransaction();
+  // this frame's command only sets up the NEXT conversion; its result is ignored
+  data_tx[0] = ((0x80 | (c << 4) | 0x04) << 8);
+  spiMaster.tx16(data_tx, 1, KSPI_PCS0);
+  unsigned long t0 = micros();
+  bool timedOut = false;
+  while (spiSlave.packetCT == 0) {
+    // wait for spi1_isr to receive the result
+    if (micros() - t0 > ADC_TIMEOUT_US) {   // nothing arrived on SPI1
+      timedOut = true;
+      break;
+    }
+  }
+  digitalWrite(CS_BB, 1);
+  read_in_flight = false;
+  NVIC_DISABLE_IRQ(IRQ_SPI1);
+  spiSlave.packetCT = 0;
+  spiSlave.dataPointer = 0;
   selectNone();
-  delayMicroseconds(20);
 
-  // NOTE: CS_BB is left LOW here, as in the original code. The 12-bit version
-  // sets it back HIGH after each read. Check whether your readback board
-  // expects it to be released.
-  return data_rx[1];
+  adcLastTimedOut = timedOut;
+  if (timedOut) {
+    adcTimeouts++;
+    return 0;
+  }
+
+  // With a 74HCT240 (inverting) readback buffer the data arrives as-is.
+  // If your board uses a 74HCT244 (non-inverting), use:  (~data_rx[1] & 0xFFFF) >> 4
+  return (data_rx[1] & 0xFFFF) >> 4;
+}
+
+// SPI1 receive interrupt: keep the data during a read, discard it otherwise.
+// The core's vector table looks this up by its C name.
+extern "C" void spi1_isr(void);
+void spi1_isr(void) {
+  cli();
+  if (read_in_flight) {
+    spiSlave.rx16(data_rx, 2);
+  } else {
+    volatile uint16_t dump;
+    spiSlave.rx16(&dump, 1);
+  }
+  sei();
 }

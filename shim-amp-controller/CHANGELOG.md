@@ -1,5 +1,45 @@
 # Changelog
 
+## 2026-10 — "no reply" marks for unanswered ADC reads
+
+- `I` and `A` print `no reply` for channels whose ADC read got no answer
+  (12-bit version), instead of a misleading -0.625 A. A board whose fiber
+  cable is on the wrong port of the fiber-optic interface board shows up as
+  eight `no reply` lines with the same slot.
+- Calibration reports `failed (no reply from ADC: check this board's fiber
+  port)` for those channels instead of `failed (gain)`; `S(b,c)` prints
+  `no-reply` for unanswered readings.
+
+## 2026-10 — 12-bit: no more freeze when the ADC doesn't answer
+
+- `readAdcCode()` waited forever for the readback word on SPI1. If nothing
+  arrived (Teensy tested on its own, boards unpowered, readback cable
+  disconnected), `I`, `A`, `C` and `S(b,c)` froze the controller. Reads now
+  give up after 5 ms, and the command ends with a warning that its readings
+  are invalid.
+- `kinetis_spi.h` now enables the SPI1 receive interrupt after restarting
+  the port, the same order T3SPI used.
+- `spi1_isr` is declared `extern "C"` so the interrupt vector always finds it.
+
+## 2026-10 — 12-bit: built-in SPI driver replaces T3SPI
+
+- New `kinetis_spi.h` in the 12-bit folder replaces the modified T3SPI
+  library, which had no license and so couldn't be published here. Nothing
+  needs installing to build either version.
+- The driver sets the same final SPI register values, pin settings and
+  transfers as the modified T3SPI; checked in a register-level simulation,
+  not yet on hardware.
+- Bit order: the old code requested `LSB_FIRST`, but T3SPI compared that
+  value against Arduino's `MSBFIRST`, so the bus ran MSB first (as the DAC
+  and ADC need). The new driver sets MSB first explicitly; behaviour is
+  unchanged.
+
+## 2026-10 — 12-bit board is Teensy 3.5
+
+- 12-bit folder renamed `revC_12bit_teensy35`; README and comments said
+  Teensy 3.2, which has too little RAM for the stored sequence (160 KB).
+- README notes that the 12-bit version needs a modified T3SPI library.
+
 ## 2026-10 — site settings in config.h, trigger selection
 
 - New `config.h` in each version holds every site setting: trigger source,

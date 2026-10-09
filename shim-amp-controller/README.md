@@ -10,7 +10,7 @@ Teensy firmware for a 48-channel shim-coil current amplifier. It:
 
 | Folder | Board | Readback ADC | Default trigger | Notes |
 |---|---|---|---|---|
-| [`revC_12bit_teensy32/`](revC_12bit_teensy32) | Teensy 3.2 | LTC1863, 12-bit | BNC | Rev C amplifier. Needs the T3SPI library. |
+| [`revC_12bit_teensy35/`](revC_12bit_teensy35) | Teensy 3.5 | LTC1863, 12-bit | BNC | Rev C amplifier. SPI driver included (`kinetis_spi.h`). |
 | [`revC_16bit_ltc1867_teensy41/`](revC_16bit_ltc1867_teensy41) | Teensy 4.1 | LTC1867, 16-bit | Fiber, echoed on BNC | Uses the standard SPI library. |
 
 Both versions accept the same serial commands, and either can use the fiber or BNC trigger.
@@ -24,16 +24,17 @@ Both versions accept the same serial commands, and either can use the fiber or B
 └── coefs.h         stored current sequence                    (version-specific)
 ```
 
+The 12-bit folder also has `kinetis_spi.h`, its SPI driver; no libraries need installing for either version.
+
 The `.ino` and `util.h` are identical in the two folders. If you change one, copy it to the other folder as well.
 
 ## Building
 
 1. Install the [Arduino IDE](https://www.arduino.cc/en/software) and [Teensyduino](https://www.pjrc.com/teensy/td_download.html).
-2. 12-bit version only: install the T3SPI library for Teensy 3.x.
-3. Edit `<version>/config.h` for your setup (see below).
-4. Open `<version>/<version>.ino`. The folder name must match the `.ino` name, so keep them together.
-5. Select the board (Teensy 3.2 or Teensy 4.1) and upload.
-6. Open the Serial Monitor at **115200 baud** with line ending set to **Newline**, and type `H`.
+2. Edit `<version>/config.h` for your setup (see below).
+3. Open `<version>/<version>.ino`. The folder name must match the `.ino` name, so keep them together.
+4. Select the board (Teensy 3.5 or Teensy 4.1) and upload.
+5. Open the Serial Monitor at **115200 baud** with line ending set to **Newline**, and type `H`.
 
 ## Site configuration (`config.h`)
 
@@ -119,6 +120,9 @@ Steps one channel through DAC outputs of 2.0, 2.25, 2.5, 2.75 and 3.0 V (about +
 - values still moving at 250-500 ms: settling problem; set `CAL_SETTLE_MS` above the time where they stop.
 
 ## Things to verify on your hardware
+
+- **SPI driver** (12-bit): `kinetis_spi.h` replaces the modified T3SPI library earlier versions needed. It sets the same SPI register values (checked in simulation, not yet on hardware), so test a 12-bit board with `C` and `S(b,c)` after first upload.
+- **Board RAM** (12-bit): the stored sequence takes 160 KB of RAM, so the 12-bit version needs a Teensy 3.5 or 3.6 (256 KB); a Teensy 3.2 (64 KB) is too small.
 
 - **Readback scaling**: `SENSE_AMP_GAIN` is 10 in the 12-bit version and 1.8 in the 16-bit version. A wrong value scales every measured gain by the same factor.
 - **Readback buffer polarity** (12-bit): the code assumes a 74HCT240. For a 74HCT244, see the comment at the end of `readAdcCode()`.
